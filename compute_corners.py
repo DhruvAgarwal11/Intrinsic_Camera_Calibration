@@ -124,6 +124,7 @@ class GetCorners():
 
 
     def get_horiz_vert_lines(self, img, outimg_name):
+
         # Get Hough Lines
         edges = cv2.Canny(img, 300, 500, None, 3)
         lines = cv2.HoughLines(edges, 1, np.pi / 180, 50)  # lines is N x 1 x 2(rho, theta)
@@ -140,6 +141,7 @@ class GetCorners():
             os.makedirs(out_fldr)
 
         # Draw lines before processing
+
         img_1 = self.draw_lines(horizontal, img, (0, 255, 0))  # draw horizontal lines
         img_1 = self.draw_lines(vertical, img_1, (0, 0, 255))  # draw vertical lines
 
@@ -161,18 +163,14 @@ class GetCorners():
         fig.savefig(os.path.join(out_fldr, outimg_name), dpi=500)
         plt.close()
 
-        # Process lines to discard duplicate and outlier lines
+        # Process lines to discard duplicate lines
         horizontal = self.remove_multiple_lines_1(horizontal, reqd_num_lines=self.num_horiz, thresh=13)
         vertical = self.remove_multiple_lines_1(vertical, reqd_num_lines=self.num_vert)
-
-        # Ensure we only keep lines that intersect within the main grid area
-        horizontal = self.filter_outliers(horizontal, axis=2)
-        vertical = self.filter_outliers(vertical, axis=2)
 
         img = self.draw_lines(horizontal, img, (0, 255, 0))  # draw horizontal lines
         img = self.draw_lines(vertical, img, (0, 0, 255))  # draw vertical lines
 
-        cv2.imwrite(os.path.join(out_fldr, "processed_" + outimg_name.split('.')[0] + ".png"), img)
+        cv2.imwrite(os.path.join(out_fldr, "processed_" + outimg_name.split('.')[0] + ".jpeg"), img)
 
         if DEBUG == 1:
             cv2.imshow("lines_{}".format(outimg_name), img)
@@ -181,32 +179,17 @@ class GetCorners():
 
         return horizontal, vertical
 
-    def filter_outliers(self, lines, axis=2, threshold=10):
-        """
-        Function to filter out lines that are outliers based on their projections.
-        :param lines: N x 3 array of lines (rho, theta, projection)
-        :param axis: Axis to filter along (0 for vertical, 2 for horizontal)
-        :param threshold: Distance threshold to consider as an outlier
-        :return: Filtered lines
-        """
-        projections = lines[:, axis]
-        mean_projection = np.mean(projections)
-        std_projection = np.std(projections)
 
-        filtered_lines = lines[np.abs(projections - mean_projection) < threshold * std_projection]
-
-        return filtered_lines
+    def get_intersection_of_lines(self, horizontal, vertical):
+        """
+        Function to get intersection between horizontal and vertical lines
+        :param horizontal: N x 2( or M) with col0 -> rho, col1-> theta
+        :param vertical: N x 2(or M) with col0 -> rho, col1 -> theta
+        :return: corners rows of x, y Homogenous coordinates N x 3
+        """
+        # Number points from left to right, top to bottom
 
 
-    def get_intersection_of_lines(self, horizontal, vertical, img_width, img_height):
-        """
-        Function to get intersection between horizontal and vertical lines.
-        :param horizontal: N x 2 (or M) with col0 -> rho, col1-> theta
-        :param vertical: N x 2 (or M) with col0 -> rho, col1 -> theta
-        :param img_width: Width of the image
-        :param img_height: Height of the image
-        :return: Corners in homogeneous coordinates
-        """
         horizonal_HC = self.generate_line_eqns(horizontal)  # rows of [a, b, c]
         vertical_HC = self.generate_line_eqns(vertical)
 
@@ -216,15 +199,11 @@ class GetCorners():
             crs = np.cross(vertical_HC, horizonal_HC[i:i+1, :])
             corners_hc = np.vstack((corners_hc, crs))
 
-        corners_hc = corners_hc[1:, :]
-        corners_hc = corners_hc.T / corners_hc[:, 2]
+        corners_hc = corners_hc[1:, :]  # Remove first row which has all zeros
+        corners_hc = corners_hc.T/corners_hc[:, 2]
         corners_hc = corners_hc.T
 
-        # Filter valid corners
-        valid_corners_hc = self.filter_valid_corners(corners_hc, img_width, img_height)
-
-        return valid_corners_hc
-
+        return corners_hc
 
     def generate_line_eqns(self, lines):
 
@@ -249,60 +228,38 @@ class GetCorners():
 
         return img
 
-    # def refine_corners_subpix(self, gray_img, corners_hc):
-
-    #     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-    #     refined_corners = np.asarray(np.round(corners_hc[:, np.newaxis, 0:2]), dtype=np.float32)
-    #     cv2.cornerSubPix(gray_img, refined_corners, (11, 11), (-1, -1), criteria)
-    #     refined_corners = np.squeeze(refined_corners)
-
-    #     refined_corners = np.concatenate((refined_corners, np.ones((refined_corners.shape[0], 1))), axis=1)
-    #     return refined_corners
     def refine_corners_subpix(self, gray_img, corners_hc):
-        img_height, img_width = gray_img.shape
-
-        # Filter valid corners
-        valid_corners_hc = self.filter_valid_corners(corners_hc, img_width, img_height)
-        
-        print(f"Valid corners before sub-pixel refinement: {valid_corners_hc.shape[0]}")
-        print(valid_corners_hc)
-        if valid_corners_hc.shape[0] == 0:
-            print("No valid corners detected for refinement.")
-            return corners_hc  # Return original if no valid corners
 
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        refined_corners = np.asarray(np.round(valid_corners_hc[:, np.newaxis, 0:2]), dtype=np.float32)
+        refined_corners = np.asarray(np.round(corners_hc[:, np.newaxis, 0:2]), dtype=np.float32)
         cv2.cornerSubPix(gray_img, refined_corners, (11, 11), (-1, -1), criteria)
         refined_corners = np.squeeze(refined_corners)
 
         refined_corners = np.concatenate((refined_corners, np.ones((refined_corners.shape[0], 1))), axis=1)
         return refined_corners
-    
-    def filter_valid_corners(self, corners, img_width, img_height):
-        """Filter out corners that are outside the image bounds."""
-        valid_corners = corners[
-            (corners[:, 0] >= 0) & (corners[:, 0] < img_width) & 
-            (corners[:, 1] >= 0) & (corners[:, 1] < img_height)
-        ]
-        return valid_corners
-
-
 
 
     def run(self, img_path):
+        """
+        MAIN Function to get corners in a image using intersection of hough lines
+        :param img_path: Full path to image
+        :return:
+        """
         print("Processing corners for {}".format(img_path))
         fname = os.path.basename(img_path)
         fname = fname.split('.')[0]
 
+
+
         img = cv2.imread(img_path)
         gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img_height, img_width = gray_img.shape
+        horizontal, vertical = self.get_horiz_vert_lines(img, outimg_name='lines_'+ fname + '.png')
 
-        horizontal, vertical = self.get_horiz_vert_lines(img, outimg_name='lines_' + fname + '.png')
-
-        corners_hc = self.get_intersection_of_lines(horizontal, vertical, img_width, img_height)
+        corners_hc = self.get_intersection_of_lines(horizontal, vertical)
 
         world_crd_hc = self.generate_world_crd(num_horiz=self.num_horiz, num_vert=self.num_vert, dist=self.dist)
+
+        #####
 
         img = self.plot_points(corners_hc, img, label_pts=True)
 
@@ -310,16 +267,20 @@ class GetCorners():
         if not os.path.exists(crnr_fldr):
             os.makedirs(crnr_fldr)
 
-        cv2.imwrite(os.path.join(crnr_fldr, 'corners_before' + fname + '.png'), img)
+        cv2.imwrite(os.path.join(crnr_fldr, 'corners_before'+ fname + '.jpeg'), img)
+
+        ######
 
         refined_corners_hc = self.refine_corners_subpix(gray_img, corners_hc)
 
         img = self.plot_points(refined_corners_hc, img, color=(0, 255, 0), label_pts=False)
-        cv2.imwrite(os.path.join(crnr_fldr, 'corners_after' + fname + '.png'), img)
+        cv2.imwrite(os.path.join(crnr_fldr, 'corners_after' + fname + '.jpeg'), img)
 
         print("Processing corners for {} ----------------------- Done! ".format(img_path))
 
         return refined_corners_hc, world_crd_hc
+
+
 
 
 
@@ -332,7 +293,7 @@ if __name__ == "__main__":
     corner_obj = GetCorners(results_fldr, num_horiz=10, num_vert=8, dist=25)
 
     for x in os.listdir(data_fldr):
-        if x.endswith('.jpg'):
+        if x.endswith('.jpeg'):
             corner_obj.run(os.path.join(data_fldr, x))
 
-    # corner_obj.run(os.path.join(data_fldr, 'Pic_1.jpg'))
+    # corner_obj.run(os.path.join(data_fldr, 'Pic_1.jpeg'))
