@@ -9,9 +9,9 @@ from scipy import optimize
 
 class CalibrateCamera:
 
-    def __init__(self, dataset_dir, num_horiz, num_vert, dist, radial_dist=True, fixed_img="Pic_11.jpg"):
+    def __init__(self, dataset_dir, num_horiz, num_vert, dist, radial_dist=True, fixed_img="Pic_11.jpeg"):
 
-        self.results_dir = os.path.join(dataset_dir, "results_{}".format(fixed_img.split(".jpg")[0].split('_')[1]))
+        self.results_dir = os.path.join(dataset_dir, "results_{}".format(fixed_img.split(".jpeg")[0].split('_')[1]))
         if not os.path.exists(self.results_dir):
             os.makedirs(self.results_dir)
 
@@ -23,7 +23,7 @@ class CalibrateCamera:
 
         self.fixed_img = fixed_img
 
-        self.imgs_dataset = [x for x in os.listdir(self.dataset_dir) if x.endswith('.jpg')]
+        self.imgs_dataset = [x for x in os.listdir(self.dataset_dir) if x.endswith('.jpeg')]
 
         self.fix_id = self.imgs_dataset.index(fixed_img)
 
@@ -180,7 +180,6 @@ class CalibrateCamera:
         Function to calculate initial R and T matrix
         :return:
         """
-
         def _build_initial_R_t(K, H):
             R = np.zeros((3, 3))
             t = np.zeros((3, 1))
@@ -197,20 +196,33 @@ class CalibrateCamera:
             R = R * scaling
             t = t * scaling
 
+            print(f"Initial R: {R}")
+            print(f"Initial t: {t}")
+
             return R, t
 
         Rt = [[] for _ in range(self.num_imgs_datset)]
 
-
         for i, img_name in enumerate(self.imgs_dataset):
-            print("Processing initial R and t values for {} -> {}".format(img_name, i))
+            print(f"Processing initial R and t values for {img_name} -> {i}")
             R_out, t_out = _build_initial_R_t(self.K, self.H[img_name])
 
-            R_out = self._condition_R_mat(R_out)
+            # Check for NaN or Inf values
+            if not np.isfinite(R_out).all():
+                print(f"Invalid R detected for {img_name}: {R_out}")
+                continue
+
+            try:
+                R_out = self._condition_R_mat(R_out)
+            except np.linalg.LinAlgError as e:
+                print(f"SVD did not converge for R: {R_out}")
+                print(f"Error: {e}")
+                R_out = np.eye(3)  # Fallback to identity matrix or another handling strategy
 
             Rt[i] = np.hstack((R_out, t_out[:, np.newaxis]))
 
         return Rt
+
 
     @staticmethod
     def _convert_R_mat_to_vec(R_mat):
@@ -264,12 +276,19 @@ class CalibrateCamera:
     def _condition_R_mat(self, R):
         """
         Function to normalize computed matrix R
-        :param R:
-        :return:
+        :param R: 3x3 matrix
+        :return: Normalized R
         """
-        U, sig, Vt = np.linalg.svd(R)
+        try:
+            print(f"Conditioning R: {R}")
+            U, sig, Vt = np.linalg.svd(R)
+            print(f"U: {U}, sig: {sig}, Vt: {Vt}")
+            return np.dot(U, Vt)
+        except np.linalg.LinAlgError as e:
+            print(f"SVD did not converge for R: {R}")
+            print(f"Error: {e}")
+            return np.eye(3)  # Fallback to identity matrix or another handling strategy
 
-        return np.dot(U, Vt)
 
     def optimize_params(self):
         pass
@@ -389,7 +408,6 @@ class CalibrateCamera:
         print("-----------------------------------------------------------------------------------------")
 
     def calculate_camera_extrinsic_params_R_t(self, radial_dist=False):
-
         print("---------------------------------------")
         print("Calculating Camera Extrinsic parameters")
         print("---------------------------------------")
@@ -398,8 +416,6 @@ class CalibrateCamera:
 
         x_init = np.zeros(num_params)
 
-        #####  Initialize x_init with K values ######
-        # K = [[alpha, gamma, u0], [0, beta, v0], [0, 0, 1]]
         x_init[0] = self.K[0][0]
         x_init[1] = self.K[0][1]
         x_init[2] = self.K[0][2]
@@ -412,18 +428,14 @@ class CalibrateCamera:
             r_vec = self._convert_R_mat_to_vec(self.Rt[i][:, 0:3])
             x_init[5+i*6: 5+(i+1)*6] = np.hstack((r_vec, self.Rt[i][:, -1]))  # assign R vector and t of each image to init values
 
-
         if radial_dist:
             self.k1_k2 = np.zeros(2)
             x_init = np.hstack((x_init, self.k1_k2))
 
         sol = optimize.least_squares(CalibrateCamera.compute_residuals, x_init, args=(self.corners_hc, self.world_hc), kwargs={'radial_dist':radial_dist},
-                                     method='lm',
-                                     xtol=1e-15, ftol=1e-15)
+                                    method='lm',
+                                    xtol=1e-15, ftol=1e-15)
 
-        ### Build K, R, t from solution
-
-        # K = [[alpha, gamma, u0], [0, beta, v0], [0, 0, 1]]
         self.K_final = np.zeros_like(self.K)
         self.K_final[0][0] = sol.x[0]
         self.K_final[0][1] = sol.x[1]
@@ -435,41 +447,27 @@ class CalibrateCamera:
         self.Rt_final = [[] for _ in range(self.num_imgs_datset)]
 
         for i in range(self.num_imgs_datset):
-
             Rt_i = sol.x[5+i*6: 5+(i+1)*6]
             R_i = self._convert_R_vec_to_mat(Rt_i[0:3])
             self.Rt_final[i] = np.hstack((R_i, Rt_i[3:].reshape(3,1)))
-
-        # if radial_dist:
-        #     self.k1_k2_final = [[] for _ in range(self.num_imgs_datset)]
-        #     num_params_krt = 5 + self.num_imgs_datset * 6
-        #     for i in range(self.num_imgs_datset):
-        #         self.k1_k2_final[i] = sol.x[num_params_krt + i*2: num_params_krt + (i+1)*2]
 
         if radial_dist:
             num_params_krt = 5 + self.num_imgs_datset * 6
             self.k1_k2_final = sol.x[num_params_krt:]
 
         print("-------------------------------------")
-
-        print("Inital_K: {}".format(self.K))
-        print("final_K: {}".format(self.K_final))
-
+        print(f"Inital_K: {self.K}")
+        print(f"final_K: {self.K_final}")
         print("------")
-
-        print("Inital_K1_k2: {}".format(self.k1_k2))
-        print("final_K1_k2: {}".format(self.k1_k2_final))
-
+        print(f"Inital_K1_k2: {self.k1_k2}")
+        print(f"final_K1_k2: {self.k1_k2_final}")
         print("------")
-
-        print("Inital_Rt: {}".format(self.Rt[0]))
-        print("final_Rt: {}".format(self.Rt_final[0]))
-
+        print(f"Inital_Rt: {self.Rt[0]}")
+        print(f"final_Rt: {self.Rt_final[0]}")
         print("-------------------------------------")
-
         print("Calculating Camera Extrinsic parameters ------------  Done!")
-
         print("-----------------------------------------------------------------------------------------")
+
 
     def project_points_on_fixed_img(self, out_dir, radial_dist):
 
@@ -711,13 +709,12 @@ class CalibrateCamera:
 
 if __name__ == "__main__":
 
-    dataset_dir = "/Users/aartighatkesar/Documents/Camera_Calibration/Dataset_1"
+    dataset_dir = "/home/dhruvagarwal/Downloads/test1"
     num_horiz = 10
     num_vert = 8
     dist = 25
-    fixed_img = "Pic_6.jpg"
+    fixed_img = "Pic_1.jpeg"
 
     calibration_obj = CalibrateCamera(dataset_dir, num_horiz, num_vert, dist, radial_dist=True, fixed_img=fixed_img)
     calibration_obj.run()
-
 
